@@ -22,6 +22,7 @@
 using namespace std;
 
 int count = 0;
+volatile bool is_sig = false;
 
 string
 get_cont_type(const string &s, uint level = 0)
@@ -222,10 +223,25 @@ envcreate(string & path)
 	return env;
 }
 
+namespace cgi_space {
+	char **env;
+}
+
+void
+clear(void)
+{
+	for (int i = 0; i < 9; i++)
+	{
+		delete [] cgi_space::env[i];
+	}
+	delete [] cgi_space::env;
+}
+	
+
 int
 cgi(string & path)
 {
-	char **env = envcreate(path);
+	cgi_space::env = envcreate(path);
 	string path1;
 	int pid = fork(), fd;
 	if (pid < 0) {
@@ -236,8 +252,10 @@ cgi(string & path)
 						O_WRONLY|O_CREAT|O_TRUNC),0777) < 0) {
 			throw "500 Internal Server Error";
 		}
+		atexit(clear);
 		dup2(fd,1);
-		execvpe((cpp_str(getenv("PWD"),strlen(getenv("PWD"))) + path).c_str(),env,env);
+		execvpe((cpp_str(getenv("PWD"),strlen(getenv("PWD"))) + path).c_str(),
+					cgi_space::env,cgi_space::env);
 		perror("execvpe");
 		exit(1);
 	}
@@ -256,22 +274,16 @@ cgi(string & path)
 	if (WEXITSTATUS(status) != 0) {
 		throw "500 Internal Server Error";
 	}
-	for (int i = 0; i < 9; i++)
-	{
-		delete [] env[i];
-	}
-	delete [] env;
+	clear();
 	return 0;
 }	
 
-void *
-otvet(void * clsocket)
+int
+otvet(int clientsocket, string status = "200 OK")
 {
-	count++;
-	cout << "Я нить номер " << count << " и я родилась\n";
-	int clientsocket = *((int *) clsocket);
+	cout << "Я родился!\n";
 	string str,msg_type,ans,msg,path,file_body,content_length;
-	string content_type,date,status = "200 OK";
+	string content_type,date;
 	bool is_cgi = false;
 	char *str1 = new char[1000];
 	if (recv(clientsocket,str1,1000,0) == -1) {
@@ -286,6 +298,9 @@ otvet(void * clsocket)
 	}
 	i++;
 	try {
+		if (status != "200 OK") {
+			throw status.c_str();
+		}
 		if (msg_type != "GET" && msg_type != "HEAD") {
 			throw "501 Not Implemented";
 		}
@@ -313,7 +328,7 @@ otvet(void * clsocket)
 		}
 		file_body = fileread(path,date,content_length);
 	}
-	catch (const char *s) {
+	catch (const char * s) {
 		status = s;
 		content_type = "text/html";
 		file_body = "<h1>Error! " + status + "</h1>\n";
@@ -327,6 +342,8 @@ otvet(void * clsocket)
 			file_body += "Unsupported request type";
 		} else if (status == "500 Internal Server Error") {
 			file_body += "Some problems occurred while processing the request";
+		} else if (status == "503 Service Unavailable") {
+			file_body += "Service is temporarily unable to process the request";
 		}
 	}
 	ans = "HTTP/1.1 "; 
@@ -342,29 +359,29 @@ otvet(void * clsocket)
 	if (msg_type == "GET") {
 		ans += file_body;
 	}
-	cout << file_body.size() << endl;
 	send(clientsocket,ans.c_str(),strlen(ans.c_str()) + 1,0);
 	shutdown(clientsocket,2);
 	close(clientsocket);
-	//exit(0);
 	delete []str1;
-	cout << "Я нить номер " << count << " и я закончилась. Конец?\n";
-	//_exit(0);
-	pthread_exit(NULL);
+	cout << "Я прожил достойную жизнь!\n";
+	return 0;
 }
 
+void
+sig(int)
+{
+	is_sig = true;
+}
 
 int
 main(int argc, char **argv)
 {
 	fd_set read_set;
-	pthread_t ident;
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	//pthread_attr_setdetachstate(&attr,1);
 	int max_d, opt = 1;
+	int pid;
 	int serversocket = socket(AF_INET,SOCK_STREAM,0), clientsocket;
 	struct sockaddr_in serveraddress;
+	signal(SIGINT,sig);
 	if (setsockopt(serversocket,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)) == -1) {
 		perror("setsockopt");
 		exit(1);
@@ -380,7 +397,7 @@ main(int argc, char **argv)
 		perror("listen");
 		return 1;
 	}
-	while (1) {
+	while (!is_sig) {
 		cout << "Новое начало - новая жизнь\n";
 		max_d = serversocket;
 		FD_ZERO(&read_set);
@@ -394,25 +411,21 @@ main(int argc, char **argv)
 			perror("accept");
 			return 1;
 		}
-		otvet((void *) &clientsocket);
-		cout << count << endl;
-		if (pthread_create(&ident,&attr,otvet,(void *) &clientsocket)) {
-			perror("pthread_create");
-			cout << "Ты же сюды не заходишь?\n";
-			exit(1);
+		sleep(5);
+		if ((pid = fork()) < 0) {
+			otvet(clientsocket,"503 Service Unavailable");
+		} else if (pid == 0) {
+			if (is_sig) {
+				otvet(clientsocket,"503 Service Unavailable");
+			} else {
+				otvet(clientsocket);
+			}
+			exit(0);
 		}
-		if (pthread_detach(ident)) {
-			perror("pthread_detach");
-			return 1;
-		}
-		//shutdown(clientsocket,2);
-	//close(clientsocket);
-		//otvet(clientsocket);
-		//break;
 		sleep(1);
-		cout << "Конец ожидает нас каждого\n";	
+		cout << "Конец ожидает нас каждого\n\n";	
 	}
-	cout << "YA TUT\n";
+	cout << "Конец?\n";
 	close(serversocket);
 	return 0;
 }
