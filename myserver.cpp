@@ -15,9 +15,9 @@
 #include <netinet/in.h>
 #include <time.h>
 #include <string>
-#include <pthread.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <cstdio>
 
 using namespace std;
 
@@ -98,54 +98,7 @@ cpp_str(const char *str, unsigned int len)
 	return ans;
 }
 
-string
-fileread(const string & pathname, string & date, string & content_length)
-{
-	string ans;
-	char ch;
-	ifstream fin;
-	int fd;
-	//fin.open(pathname.c_str(),ios_base::binary|ios_base::in);
-	//if (fin.is_open()) {
-	if ((fd = open(pathname.c_str(),O_RDONLY|O_NONBLOCK)) != -1) {
-		//while (!fin.eof()) {
-		int size = 0;
-		ioctl(fd,FIONREAD,&size);
-		content_length = int_to_str(size);
-		for (int i = 0; i < size; i++)
-		{
-			//fin.get(ch);
-			//if (!fin.eof()) {
-			read(fd,&ch,1);
-			ans.push_back(ch);
-			//}
-		}
-		//fin.close();
-		struct stat buf;
-		if (stat(pathname.c_str(),&buf) == -1) {
-			perror("stat");
-		}
-		char *buf1 = new char[30];
-		time_t tm = buf.st_mtime;
-		strftime(buf1, 30, "%a, %d %b %Y %H:%M:%S GMT", localtime(&tm));
-		date = cpp_str(buf1,30);
-		delete []buf1;
-		close(fd);
-	} else {
-		perror("open");
-		switch (errno) {
-			case EACCES:
-				throw "403 Forbidden";
-				break;
-			case ENOENT:
-				throw "404 Not Found";
-				break;
-			default:
-				break;
-		}
-	}
-	return ans;
-}
+
 
 int
 cpy(char *str, string &str1)
@@ -282,10 +235,12 @@ int
 otvet(int clientsocket, string status = "200 OK")
 {
 	cout << "Я родился!\n";
-	string str,msg_type,ans,msg,path,file_body,content_length;
+	string str,msg_type,ans,msg,path,error_body,content_length;
 	string content_type,date;
 	bool is_cgi = false;
 	char *str1 = new char[1000];
+	char ch;
+	int fd;
 	if (recv(clientsocket,str1,1000,0) == -1) {
 		perror("recv");
 		exit(0);
@@ -326,24 +281,46 @@ otvet(int clientsocket, string status = "200 OK")
 		} else {
 			path = cpp_str(getenv("PWD"),strlen(getenv("PWD"))) + path;
 		}
-		file_body = fileread(path,date,content_length);
+		if ((fd = open(path.c_str(),O_RDONLY|O_NONBLOCK)) != -1) {
+			struct stat buf;
+			if (stat(path.c_str(),&buf) == -1) {
+				perror("stat");
+			}
+			char *buf1 = new char[30];
+			time_t tm = buf.st_mtime;
+			strftime(buf1, 30, "%a, %d %b %Y %H:%M:%S GMT", localtime(&tm));
+			date = cpp_str(buf1,30);
+			delete []buf1;
+		} else {
+			perror("open");
+			switch (errno) {
+				case EACCES:
+					throw "403 Forbidden";
+					break;
+				case ENOENT:
+					throw "404 Not Found";
+					break;
+				default:
+					break;
+			}
+		}
 	}
 	catch (const char * s) {
 		status = s;
 		content_type = "text/html";
-		file_body = "<h1>Error! " + status + "</h1>\n";
+		error_body = "<h1>Error! " + status + "</h1>\n";
 		if (status == "400 Bad Request") {
-			file_body += "URI contains invalid characters or requests invalid content";
+			error_body += "URI contains invalid characters or requests invalid content";
 		} else if (status == "403 Forbidden") {
-			file_body += "Permission denied";
+			error_body += "Permission denied";
 		} else if (status == "404 Not Found") {
-			file_body += "File doesn't exist";
+			error_body += "File doesn't exist";
 		} else if (status == "501 Not Implemented") {
-			file_body += "Unsupported request type";
+			error_body += "Unsupported request type";
 		} else if (status == "500 Internal Server Error") {
-			file_body += "Some problems occurred while processing the request";
+			error_body += "Some problems occurred while processing the request";
 		} else if (status == "503 Service Unavailable") {
-			file_body += "Service is temporarily unable to process the request";
+			error_body += "Service is temporarily unable to process the request";
 		}
 	}
 	ans = "HTTP/1.1 "; 
@@ -354,12 +331,28 @@ otvet(int clientsocket, string status = "200 OK")
 	ans += "Date: " + cpp_str(str1,30) + "\n";
 	ans += "Last-modified: " + date + "\n";
 	ans += "Content-type: " + content_type + "\n";
-	ans += "Content-length: " + content_length + "\n\n";
-	cout << msg << endl << ans << endl;
-	if (msg_type == "GET") {
-		ans += file_body;
-	}
-	send(clientsocket,ans.c_str(),strlen(ans.c_str()) + 1,0);
+	ans += "Content-length: ";
+	send(clientsocket,ans.c_str(),strlen(ans.c_str()),0);
+	if (status == "200 OK") {
+		int size = 0;
+		ioctl(fd,FIONREAD,&size);
+		content_length = int_to_str(size);
+		send(clientsocket,content_length.c_str(),strlen(content_length.c_str()),0);
+		send(clientsocket,"\n\n",2,0);
+		if (msg_type == "GET") {
+			for (int i = 0; i < size; i++)
+			{
+				read(fd,&ch,1);
+				send(clientsocket,&ch,1,0);
+			}
+		}
+	} else {
+		sprintf(str1,"%d",strlen(error_body.c_str()));
+		send(clientsocket,str1,strlen(str1),0);
+		send(clientsocket,"\n\n",2,0);
+		send(clientsocket,error_body.c_str(),strlen(error_body.c_str()),0);
+	}	
+	close(fd);
 	shutdown(clientsocket,2);
 	close(clientsocket);
 	delete []str1;
@@ -411,7 +404,6 @@ main(int argc, char **argv)
 			perror("accept");
 			return 1;
 		}
-		sleep(5);
 		if ((pid = fork()) < 0) {
 			otvet(clientsocket,"503 Service Unavailable");
 		} else if (pid == 0) {
@@ -422,7 +414,6 @@ main(int argc, char **argv)
 			}
 			exit(0);
 		}
-		sleep(1);
 		cout << "Конец ожидает нас каждого\n\n";	
 	}
 	cout << "Конец?\n";
